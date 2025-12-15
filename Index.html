@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turbo 3D Particles (Lag Free)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        /* ERROR SCREEN (Only shows if opened wrong) */
+        #error-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 0, 0, 0.95); z-index: 9999;
+            display: none; flex-direction: column; justify-content: center; align-items: center;
+            color: #fff; text-align: center;
+        }
+        .fix-box { background: #222; padding: 20px; border-radius: 8px; border: 1px solid #ff4444; margin-top: 20px; text-align: left;}
+
+        /* UI OVERLAY */
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 100; pointer-events: none; }
+        .card {
+            background: rgba(0, 0, 0, 0.7); border: 1px solid #333; backdrop-filter: blur(5px);
+            padding: 15px; border-radius: 10px; color: #fff; pointer-events: auto;
+            min-width: 220px; margin-bottom: 10px;
+        }
+        h3 { margin: 0 0 10px 0; color: #00ff88; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+        
+        .row { display: flex; justify-content: space-between; margin-bottom: 6px; color: #888; font-size: 0.85rem; transition: all 0.2s;}
+        .row.active { color: #fff; font-weight: bold; text-shadow: 0 0 8px #00ff88; transform: scale(1.05); }
+        
+        select { width: 100%; padding: 6px; background: #111; color: #ddd; border: 1px solid #444; border-radius: 4px; font-size: 0.8rem;}
+
+        /* FPS & STATUS */
+        #status { font-size: 0.8rem; margin-bottom: 8px; color: yellow; }
+        
+        /* HIDDEN PREVIEW (Processing only) */
+        #preview { position: absolute; bottom: 10px; right: 10px; width: 120px; opacity: 0.5; border-radius: 6px; transform: scaleX(-1); }
+    </style>
+    
+    <script type="importmap">
+        { "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }}
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="error-screen">
+        <h1 style="color: #ff4444;">⛔ CAMERA BLOCKED</h1>
+        <p>Browsers block the camera if you double-click the file.</p>
+        <div class="fix-box">
+            <p><b>Solution:</b> Use "Live Server" in VS Code.</p>
+            <p><i>(Right Click HTML file -> Open with Live Server)</i></p>
+        </div>
+    </div>
+
+    <div id="ui">
+        <div class="card">
+            <h3>System</h3>
+            <div id="status">Initializing AI...</div>
+            <select id="cam-select"><option>Loading Cameras...</option></select>
+        </div>
+        <div class="card">
+            <h3>Gestures</h3>
+            <div class="row" id="g-1"><span>☝️ 1 Finger</span> Sphere</div>
+            <div class="row" id="g-2"><span>✌️ 2 Fingers</span> Heart</div>
+            <div class="row" id="g-3"><span>👌 3 Fingers</span> Saturn</div>
+            <div class="row" id="g-4"><span>🖖 4 Fingers</span> Helix</div>
+            <div class="row" id="g-5"><span>🖐 5 Fingers</span> GALAXY</div>
+        </div>
+        <div class="card" style="font-size: 0.8rem; color: #aaa;">
+            <div>↔ Move hand to Rotate</div>
+            <div>🤏 Pinch to Resize</div>
+        </div>
+    </div>
+
+    <video id="preview" playsinline autoplay muted></video>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 1. PERFORMANCE CONFIG ---
+        const CONFIG = {
+            COUNT: 4000,          // Optimized particle count (Not too high, not too low)
+            FOLLOW_SPEED: 0.12,   // Responsiveness (0.1 = smooth, 0.2 = fast)
+            MORPH_SPEED: 0.08     // How fast shapes change
+        };
+
+        if (window.location.protocol === 'file:') {
+            document.getElementById('error-screen').style.display = 'flex';
+            throw new Error("File Protocol Blocked");
+        }
+
+        // --- 2. STATE MANAGEMENT ---
+        const state = {
+            hand: { x: 0, y: 0, pinch: 1.0 },
+            smooth: { x: 0, y: 0, pinch: 1.0 }, // For smoothing
+            shape: 'sphere',
+            hue: 0.6 // Start color (Blue)
+        };
+
+        // --- 3. INIT THREE.JS ---
+        let scene, camera, renderer, particles, geometry, targetPositions;
+        
+        initGraphics();
+        initAI();
+
+        function initGraphics() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 45;
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio for speed
+            document.body.appendChild(renderer.domElement);
+
+            // Create Buffers
+            geometry = new THREE.BufferGeometry();
+            const pos = new Float32Array(CONFIG.COUNT * 3);
+            targetPositions = new Float32Array(CONFIG.COUNT * 3);
+            const col = new Float32Array(CONFIG.COUNT * 3);
+
+            for(let i=0; i<CONFIG.COUNT; i++) {
+                pos[i*3] = (Math.random()-0.5)*50;
+                pos[i*3+1] = (Math.random()-0.5)*50;
+                pos[i*3+2] = (Math.random()-0.5)*50;
+                
+                col[i*3]=0.2; col[i*3+1]=0.6; col[i*3+2]=1.0; // Initial Blue
+            }
+            
+            geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+
+            // Generate "Good Ball" Texture (Soft Glow)
+            const canvas = document.createElement('canvas'); canvas.width=32; canvas.height=32;
+            const ctx = canvas.getContext('2d');
+            const g = ctx.createRadialGradient(16,16,0,16,16,16);
+            g.addColorStop(0, 'rgba(255,255,255,1)'); 
+            g.addColorStop(0.4, 'rgba(200,200,255,0.5)'); 
+            g.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = g; ctx.fillRect(0,0,32,32);
+            const tex = new THREE.Texture(canvas); tex.needsUpdate = true;
+
+            const mat = new THREE.PointsMaterial({ 
+                size: 0.7, map: tex, vertexColors: true, 
+                blending: THREE.AdditiveBlending, depthWrite: false, transparent: true 
+            });
+
+            particles = new THREE.Points(geometry, mat);
+            scene.add(particles);
+
+            calcShape('sphere');
+            animate();
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth/window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // --- 4. ANIMATION LOOP (Optimized) ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // SMOOTHING: Move "Smooth" values towards "Real" values
+            state.smooth.x += (state.hand.x - state.smooth.x) * CONFIG.FOLLOW_SPEED;
+            state.smooth.y += (state.hand.y - state.smooth.y) * CONFIG.FOLLOW_SPEED;
+            state.smooth.pinch += (state.hand.pinch - state.smooth.pinch) * CONFIG.FOLLOW_SPEED;
+
+            // 1. ROTATION (Based on Hand X/Y)
+            particles.rotation.y = state.smooth.x; 
+            particles.rotation.x = -state.smooth.y;
+
+            // 2. COLOR SHIFT (Based on Hand X Position)
+            // Map X rotation (-3 to 3) to Hue (0 to 1)
+            const targetHue = (Math.sin(state.smooth.x * 0.5) + 1) / 2;
+            // Slowly blend color
+            const colors = geometry.attributes.color.array;
+            const colorObj = new THREE.Color();
+            
+            // We'll update the 'state.hue' slowly
+            state.hue += (targetHue - state.hue) * 0.05;
+            colorObj.setHSL(state.hue, 0.8, 0.6);
+
+            // 3. PARTICLE MOVEMENT
+            const p = geometry.attributes.position.array;
+            let scale = state.smooth.pinch;
+            if(state.shape === 'galaxy') scale *= 1.5; // Galaxy needs to be bigger
+
+            for(let i=0; i<CONFIG.COUNT; i++) {
+                const ix = i*3; const iy = i*3+1; const iz = i*3+2;
+                
+                // Move towards Target * Scale
+                p[ix] += (targetPositions[ix]*scale - p[ix]) * CONFIG.MORPH_SPEED;
+                p[iy] += (targetPositions[iy]*scale - p[iy]) * CONFIG.MORPH_SPEED;
+                p[iz] += (targetPositions[iz]*scale - p[iz]) * CONFIG.MORPH_SPEED;
+
+                // Simple Color assignment (fast)
+                colors[ix] = colorObj.r; 
+                colors[iy] = colorObj.g; 
+                colors[iz] = colorObj.b;
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        // --- 5. SHAPE MATH ---
+        function calcShape(type) {
+            state.shape = type;
+            for(let i=0; i<CONFIG.COUNT; i++) {
+                let x,y,z; const idx=i*3; const rRatio = i/CONFIG.COUNT;
+                
+                if(type==='sphere'){
+                    const phi = Math.acos(-1+(2*i)/CONFIG.COUNT); const theta = Math.sqrt(CONFIG.COUNT*Math.PI)*phi;
+                    const r=16; x=r*Math.cos(theta)*Math.sin(phi); y=r*Math.sin(theta)*Math.sin(phi); z=r*Math.cos(phi);
+                } 
+                else if(type==='heart'){
+                    const u=Math.random()*6.28, v=Math.random()*3.14, s=0.9;
+                    x=s*16*Math.pow(Math.sin(u),3)*Math.sin(v); 
+                    y=s*(13*Math.cos(u)-5*Math.cos(2*u)-2*Math.cos(3*u)-Math.cos(4*u));
+                    z=s*6*Math.cos(v)*Math.pow(Math.sin(u),3);
+                } 
+                else if(type==='saturn'){
+                    if(i < CONFIG.COUNT*0.4) { // Planet
+                        const r=7; const phi=Math.acos(-1+(2*i)/(CONFIG.COUNT*0.4)); const theta=Math.sqrt(CONFIG.COUNT*Math.PI)*phi;
+                        x=r*Math.cos(theta)*Math.sin(phi); y=r*Math.sin(theta)*Math.sin(phi); z=r*Math.cos(phi);
+                    } else { // Ring
+                        const ang=Math.random()*6.28; const r=11+Math.random()*6;
+                        x=Math.cos(ang)*r; z=Math.sin(ang)*r; y=(Math.random()-0.5)*0.5;
+                    }
+                }
+                else if(type==='helix'){
+                    const ang = rRatio * Math.PI * 10; const r=7;
+                    x=Math.cos(ang)*r; z=Math.sin(ang)*r; y=(rRatio-0.5)*30;
+                }
+                else if(type==='galaxy'){
+                     const arms=5; const spin=rRatio*10; const r=rRatio*25;
+                     const angle=spin + (i%arms)*(Math.PI*2/arms);
+                     x=Math.cos(angle)*r; z=Math.sin(angle)*r; y=(Math.random()-0.5)*(10-rRatio*8);
+                }
+                targetPositions[idx]=x; targetPositions[idx+1]=y; targetPositions[idx+2]=z;
+            }
+        }
+
+        // --- 6. AI & CAMERA ---
+        async function initAI() {
+            const status = document.getElementById('status');
+            const video = document.getElementById('preview');
+            const select = document.getElementById('cam-select');
+
+            try {
+                // MediaPipe Setup
+                const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+                hands.setOptions({ 
+                    maxNumHands: 1, 
+                    modelComplexity: 0, // 0 = LITE (Fastest), 1 = FULL
+                    minDetectionConfidence: 0.5, 
+                    minTrackingConfidence: 0.5 
+                });
+                hands.onResults(onAIResults);
+
+                // Camera Setup (Low res for speed)
+                status.innerText = "Requesting Cam...";
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: {ideal: 640}, height: {ideal: 360} } 
+                });
+                video.srcObject = stream;
+                status.innerText = "Active & Tracking";
+                status.style.color = "#00ff88";
+
+                // Loop
+                async function loop() {
+                    if(video.readyState >= 2) await hands.send({image: video});
+                    requestAnimationFrame(loop);
+                }
+                loop();
+
+                // Dropdown Logic
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevs = devices.filter(d => d.kind === 'videoinput');
+                if(videoDevs.length > 0) {
+                    select.innerHTML = "";
+                    videoDevs.forEach(d => {
+                        const opt = document.createElement('option');
+                        opt.value = d.deviceId; opt.text = d.label || `Camera ${select.length}`;
+                        select.appendChild(opt);
+                    });
+                    select.onchange = async () => {
+                         const newStream = await navigator.mediaDevices.getUserMedia({ 
+                             video: { deviceId: { exact: select.value }, width:{ideal:640}, height:{ideal:360} } 
+                         });
+                         video.srcObject = newStream;
+                    };
+                }
+
+            } catch(e) {
+                status.innerText = "Error: " + e.message;
+                status.style.color = "red";
+                console.error(e);
+            }
+        }
+
+        function onAIResults(res) {
+            if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+                const lm = res.multiHandLandmarks[0];
+                
+                // 1. POSITION (Center of hand)
+                // Map 0..1 to -3..3 range for rotation
+                state.hand.x = (lm[9].x - 0.5) * 4; 
+                state.hand.y = (lm[9].y - 0.5) * 4;
+
+                // 2. PINCH (Thumb to Index)
+                const d = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+                state.hand.pinch = Math.max(0.5, d * 5); // Amplify distance
+
+                // 3. FINGER COUNTING
+                let f = 0;
+                if(lm[8].y < lm[6].y) f++; // Index
+                if(lm[12].y < lm[10].y) f++; // Middle
+                if(lm[16].y < lm[14].y) f++; // Ring
+                if(lm[20].y < lm[18].y) f++; // Pinky
+                if(lm[4].x < lm[3].x) f++; // Thumb side check
+
+                // 4. TRIGGER SHAPE
+                let s = 'sphere';
+                if(f==1) s='sphere'; 
+                else if(f==2) s='heart'; 
+                else if(f==3) s='saturn'; 
+                else if(f==4) s='helix'; 
+                else if(f==5) s='galaxy';
+
+                // Update UI & Shape only if changed
+                if(s !== state.shape) {
+                    calcShape(s);
+                    document.querySelectorAll('.row').forEach(el => el.classList.remove('active'));
+                    const row = document.getElementById(`g-${Math.max(1, f)}`);
+                    if(row) row.classList.add('active');
+                }
+            }
+        }
+    </script>
+</body>
+</html>
